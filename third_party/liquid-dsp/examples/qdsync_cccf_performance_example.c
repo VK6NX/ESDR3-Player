@@ -1,0 +1,106 @@
+char __docstr__[] =
+"This example tests the performance for detecting and decoding frames"
+" with the qdsync_cccf object.";
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include "liquid.h"
+#include "liquid.argparse.h"
+
+int main(int argc, char*argv[])
+{
+    // define variables and parse command-line options
+    liquid_argparse_init(__docstr__);
+    liquid_argparse_add(char*, filename, "qdsync_cccf_performance_example.m",'o', "output filename", NULL);
+    liquid_argparse_add(unsigned, sequence_len,240, 'n', "number of sync symbols", NULL);
+    liquid_argparse_add(unsigned, k,             2, 'k', "samples/symbol", NULL);
+    liquid_argparse_add(unsigned, m,             7, 'm', "filter delay [symbols]", NULL);
+    liquid_argparse_add(float,    beta,        0.3, 'b', "excess bandwidth factor", NULL);
+    liquid_argparse_add(char*,ftype_str,"arkaiser", 'f', "filter type", liquid_argparse_firfilt);
+    liquid_argparse_add(float,    threshold,  0.20, 'z', "detection threshold", NULL);
+    liquid_argparse_add(unsigned, min_missed,    5, 'e', "minimum number of errors (missed detects) to simulation", NULL);
+    liquid_argparse_add(unsigned, min_trials,   20, 't', "minimum number of packet trials to simulate", NULL);
+    liquid_argparse_add(unsigned, max_trials,  800, 'T', "maximum number of packet trials to simulate", NULL);
+    liquid_argparse_add(float,    SNRdB,       -25, 's', "noise standard deviation", NULL);
+    liquid_argparse_add(unsigned, tmax,        800, 'd', "maximum fractional delay supported", NULL);
+    liquid_argparse_parse(argc,argv);
+
+    // generate synchronization sequence (QPSK symbols)
+    float complex seq[sequence_len];
+    unsigned int i;
+    for (i=0; i<sequence_len ; i++) {
+        seq[i] = (rand() % 2 ? 1.0f : -1.0f) * M_SQRT1_2 +
+                 (rand() % 2 ? 1.0f : -1.0f) * M_SQRT1_2 * _Complex_I;
+    }
+
+    // interpolate sequence
+    int ftype = liquid_getopt_str2firfilt(ftype_str);
+
+    // create sync object and run signal through
+    qdsync_cccf q = qdsync_cccf_create_linear(seq, sequence_len, ftype, k, m, beta, NULL, NULL);
+    qdsync_cccf_set_threshold(q, threshold);
+
+    // copy signal to buffer, extended and padded to account for delay
+    unsigned int buf_len = 3*sequence_len*k + tmax + 40;
+    float complex buf_0[buf_len];
+    float complex buf_1[buf_len];
+    float complex * s = (float complex*) qdsync_cccf_get_sequence(q);
+    unsigned int s_len = qdsync_cccf_get_seq_len(q);
+    for (i=0; i<buf_len; i++)
+        buf_0[i] = i < s_len ? s[i] : 0.0f;
+
+    // create fractional delay generator
+    fdelay_crcf fdelay = fdelay_crcf_create(tmax, 20, 64); // nmax, m, npfb
+
+    // open file for storing results
+    FILE * fid = fopen(filename,"w");
+    fprintf(fid,"%% %s : auto-generated file\n", filename);
+    fprintf(fid,"clear all; close all; SNR=[]; Pmd=[];\n");
+    while (SNRdB <= 5.0f)
+    {
+        float        nstd = powf(10.0f, -SNRdB/20.0f) * M_SQRT2;
+        unsigned int t;
+        unsigned int num_trials = 0;
+        unsigned int num_missed = 0;
+        while (1) {
+            for (t=0; t<min_trials; t++) {
+                // delay buffer and add noise
+                fdelay_crcf_reset(fdelay);
+                fdelay_crcf_set_delay(fdelay, randf()*tmax);
+                fdelay_crcf_execute_block(fdelay, buf_0, buf_len, buf_1);
+                for (i=0; i<buf_len; i++)
+                    buf_1[i] += nstd*(randnf() + _Complex_I*randnf())*M_SQRT1_2;
+
+                // run through synchronizer
+                qdsync_cccf_reset(q);
+                qdsync_cccf_execute(q, buf_1, buf_len);
+                num_missed += qdsync_cccf_is_detected(q) ? 0 : 1;
+            }
+            num_trials += min_trials;
+            if (num_missed >= min_missed)
+                break;
+            if (num_trials >= max_trials)
+                break;
+        }
+        float pmd = (float)num_missed / (float)num_trials;
+        printf("SNR: %8.3f dB, missed %4u / %4u (%5.1f%%)\n", SNRdB, num_missed, num_trials, pmd*100);
+        if (num_missed < min_missed)
+            break;
+        fprintf(fid,"SNR(end+1)=%12g; Pmd(end+1)=%12g;\n", SNRdB, pmd);
+        SNRdB += 1.0f;
+    }
+    qdsync_cccf_destroy(q);
+    fdelay_crcf_destroy(fdelay);
+
+    fprintf(fid,"sequence_len = %u;\n", sequence_len);
+    fprintf(fid,"figure('color','white','position',[100 100 640 640]);\n");
+    fprintf(fid,"semilogy(SNR,Pmd,'-x');\n");
+    fprintf(fid,"xlabel('SNR [dB]');\n");
+    fprintf(fid,"ylabel('Probability of Missed Detect');\n");
+    fprintf(fid,"grid on;\n");
+    fclose(fid);
+    printf("results written to '%s'\n", filename);
+    return 0;
+}
+
