@@ -8,7 +8,7 @@ A light player for ExpertSDR3 IQ for Mac Silicon, Mac Intel, Win, Linux
 C панорамой, водопадом, зумом и приёмом в модах CW, USB, LSB, AM, FM. Самодостаточный: единственная внешняя зависимость это Qt, liquid-dsp лежит в дереве и собирается статически.
 Comes with a panadapter, waterfall, zoom and CW/SSB/AM/FM audio. Self-contained: Qt is the only external dependency, liquid-dsp is vendored.
 
-## Сборка
+## Make
 
 Qt 6.10.3, CMake 3.21+, компилятор C++20.
 Целевая и единственная поддерживаемая ветка Qt: 6.10.
@@ -18,7 +18,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=~/Qt
 cmake --build build
 ```
 
-## Документация
+## Docs
 
 - [DOCS/user-guide.md](DOCS/user-guide.md): руководство пользователя (RU),
   [DOCS/user-guide.en.md](DOCS/user-guide.en.md) (EN).
