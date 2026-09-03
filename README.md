@@ -1,4 +1,4 @@
-# ESDR3_Player
+# ESDR3 Player 
 
 
 Плеер IQ-записей ExpertSDR3 для Mac Silicon, Mac Intel, Win, Linux
