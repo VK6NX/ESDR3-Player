@@ -1,0 +1,15 @@
+# pkg-config file for liquid-dsp
+
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=@libdir_for_pc_file@
+includedir=@includedir_for_pc_file@
+
+Name: liquid-dsp
+Description: @PROJECT_DESCRIPTION@
+Version: @PROJECT_VERSION@
+URL: @PROJECT_HOMEPAGE@
+License: @PROJECT_LICENSE@
+Libs: -L${libdir} -l@LIBNAME@
+Libs.private: -lm@LIQUID_PC_LIBS_PRIVATE@
+Cflags: -I${includedir}

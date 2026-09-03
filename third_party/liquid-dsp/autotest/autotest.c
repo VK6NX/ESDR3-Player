@@ -1,0 +1,571 @@
+/*
+ * Copyright (c) 2007 - 2026 Joseph Gaeddert
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+// default include headers
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "liquid.autotest.h"
+
+// print test info
+int liquid_autotest_print_info(liquid_autotest _q, unsigned int _index)
+{
+    liquid_log_info("index=%4u, name=%s, description=%s, keywords=%s, cost=%g",
+        _index, _q->name, _q->docstr, _q->keywords, _q->cost);
+    return LIQUID_OK;
+}
+
+// print test status
+int liquid_autotest_print_status(liquid_autotest _q)
+{
+    // don't print status for skipped tests
+    if (_q->status == LIQUID_AUTOTEST_SKIP)
+        return LIQUID_OK;
+
+    char strbuf[92];
+    char * s = strbuf;
+    int log_level = LIQUID_INFO;
+
+    s += sprintf(s,"%s ", _q->name);
+    unsigned int j;
+    for (j=strlen(_q->name); j<40; j++)
+        s += sprintf(s,".");
+
+    switch(_q->status) {
+    case LIQUID_AUTOTEST_PASS:
+        s += sprintf(s," pass [      %5u]", _q->num_pass);
+        if (_q->num_warn)
+            log_level = LIQUID_WARN;
+        break;
+    case LIQUID_AUTOTEST_FAIL:
+        s += sprintf(s,"*FAIL*[%5u/%5u]", _q->num_fail, _q->num_pass + _q->num_fail);
+        log_level = LIQUID_ERROR;
+        break;
+    case LIQUID_AUTOTEST_SKIP:
+        s += sprintf(s," skip [           ]");
+        break;
+    default: return liquid_error(LIQUID_EINT,"unexpected status");
+    }
+    s += sprintf(s," %9.3f ms", _q->runtime*1e3);
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"%s",strbuf);
+    return LIQUID_OK;
+}
+
+int liquid_autotest_execute(liquid_autotest _q)
+{
+    if (_q->status != LIQUID_AUTOTEST_SCHED)
+        return liquid_error(LIQUID_EIMODE,"unexpected status mode for test '%s'", _q->name);
+
+    liquid_log_info("running test '%s' (%s)", _q->name, _q->docstr);
+    _q->status = LIQUID_AUTOTEST_ACTIVE;
+    // create and start timer
+    liquid_timer timer = liquid_timer_create(LIQUID_TIMER_RUSAGE);
+    // run test, passing reference to itself as argument
+    _q->func(_q);
+    // update runtime and destroy timer
+    _q->runtime = liquid_timer_toc(timer);
+    liquid_timer_destroy(timer);
+    _q->status = _q->num_fail > 0 ? LIQUID_AUTOTEST_FAIL : LIQUID_AUTOTEST_PASS;
+    //
+    //if (strlen(_q->docstr)==0)
+    //    LIQUID_WARN_(_q,"empty docstring for test %s", _q->name);
+    return LIQUID_OK;
+}
+
+void liquid_autotest_pass(liquid_autotest _q)
+{
+    _q->num_pass++;
+}
+
+void liquid_autotest_fail(liquid_autotest _q,
+                          const char *    _file,
+                          unsigned int    _line,
+                          const char *    _expression)
+{
+    liquid_log(NULL,LIQUID_ERROR,_file,_line,"failed: \"%s\"", _expression);
+    _q->num_fail++;
+}
+
+// print warning to stderr
+// increment liquid_autotest_num_warnings
+//  _file       :   filename (string)
+//  _line       :   line number of test
+//  _message    :   message string
+void liquid_autotest_warn(liquid_autotest _q,
+                          const char *    _file,
+                          unsigned int    _line,
+                          const char *    _format,
+                          ...)
+{
+    _q->num_warn++;
+
+    va_list ap;
+    va_start(ap, _format);
+    liquid_vlog(NULL, LIQUID_WARN, _file, _line, _format, ap);
+    va_end(ap);
+}
+
+// create registry from pointer to tests
+liquid_registry liquid_registry_create(liquid_autotest * _autotests)
+{
+    // count tests
+    unsigned int max_tests = 8000; // safeguard
+    unsigned int num_tests = 0;
+    while (_autotests[num_tests] != NULL && num_tests < max_tests)
+        num_tests++;
+    if (num_tests >= max_tests)
+        return liquid_error_config("liquid_registry_create(), number of tests exceeds maximum");
+
+    //
+    liquid_registry q = (liquid_registry)malloc(sizeof(struct liquid_registry_s));
+
+    q->num_tests        = num_tests;
+    q->num_tests_pass   = 0;
+    q->num_tests_fail   = 0;
+    q->num_tests_skip   = 0;
+    q->num_checks_pass  = 0;
+    q->num_checks_fail  = 0;
+    q->num_checks_warn  = 0;
+    q->autotests        = _autotests;
+
+    //
+    q->timer = liquid_timer_create(LIQUID_TIMER_CLOCK);
+
+    // schedule all tests to run by default
+    liquid_registry_schedule_all(q);
+
+    return q;
+}
+
+// destroy registry
+int liquid_registry_destroy(liquid_registry _q)
+{
+    liquid_timer_destroy(_q->timer);
+    free(_q);
+    return LIQUID_OK;
+}
+
+#if 0
+// print registry, either info or full status
+struct liquid_registry_info_s liquid_registry_info(const liquid_autotest * _registry)
+{
+    struct liquid_registry_info_s info = {0U,0U,0U,0U,0U,0U,0U,};
+    unsigned int i = 0;
+    while (_registry[i] != NULL)
+    {
+        liquid_autotest test = _registry[i++];
+
+        // accumulate test statistics
+        info.num_tests_pass  += test->status == LIQUID_AUTOTEST_PASS;
+        info.num_tests_fail  += test->status == LIQUID_AUTOTEST_FAIL;
+        info.num_tests_skip  += test->status == LIQUID_AUTOTEST_SKIP;
+
+        // accumulate check statistics
+        info.num_checks_pass += test->num_pass;
+        info.num_checks_fail += test->num_fail;
+        info.num_checks_warn += test->num_warn;
+    }
+    info.num_tests = i;
+
+    return info;
+}
+#endif
+
+// schedule all tests to run
+int liquid_registry_schedule_all(liquid_registry _q)
+{
+    unsigned int i;
+    for (i=0; i<_q->num_tests; i++)
+        _q->autotests[i]->status = LIQUID_AUTOTEST_SCHED;
+    return LIQUID_OK;
+}
+
+// schedule one specific test to run
+int liquid_registry_schedule_one(liquid_registry _q, unsigned int _id)
+{
+    unsigned int i;
+    for (i=0; i<_q->num_tests; i++)
+        _q->autotests[i]->status = (i == _id) ? LIQUID_AUTOTEST_SCHED : LIQUID_AUTOTEST_SKIP;
+
+    if (_id >= _q->num_tests)
+        return liquid_error(LIQUID_EIRANGE,"liquid_registry_schedule_one(), id (%u) exceeds maximum (%u)", _id, _q->num_tests);
+
+    return LIQUID_OK;
+}
+
+// schedule only tests that match search string
+int liquid_registry_schedule_search(liquid_registry _q, const char * _query)
+{
+    unsigned int i;
+    unsigned int num_found = 0;
+    for (i=0; i<_q->num_tests; i++)
+    {
+        if (strstr(_q->autotests[i]->name,_query) != NULL) {
+            _q->autotests[i]->status = LIQUID_AUTOTEST_SCHED;
+            num_found++;
+        } else {
+            _q->autotests[i]->status = LIQUID_AUTOTEST_SKIP;
+        }
+    }
+    if (num_found == 0)
+        liquid_log_warn("liquid_registry_schedule_search(), no tests matched query '%s'", _query);
+
+    return LIQUID_OK;
+}
+
+// run all scheduled tests
+int liquid_registry_execute(liquid_registry _q, bool _halt_on_fail)
+{
+    // reset test statistics
+    _q->num_tests_pass  = 0;
+    _q->num_tests_fail  = 0;
+    _q->num_tests_skip  = 0;
+
+    // reset check statistics
+    _q->num_checks_pass = 0;
+    _q->num_checks_fail = 0;
+    _q->num_checks_warn = 0;
+
+    // run all scheduled tests
+    unsigned int i;
+    bool continue_running = true;
+    for (i=0; i<_q->num_tests; i++)
+    {
+        liquid_autotest autotest = _q->autotests[i];
+        if (!continue_running) {
+            // skip remaining tests
+            autotest->status = LIQUID_AUTOTEST_SKIP;
+        } else if (autotest->status == LIQUID_AUTOTEST_SCHED)
+        {
+            liquid_autotest_execute(autotest);
+            if (autotest->num_fail && _halt_on_fail)
+                continue_running = false;
+        } else if (autotest->status == LIQUID_AUTOTEST_SKIP) {
+            //liquid_log_trace("skipping test '%s'\n", autotest->docstr);
+        }
+
+        // accumulate test statistics
+        _q->num_tests_pass  += autotest->status == LIQUID_AUTOTEST_PASS;
+        _q->num_tests_fail  += autotest->status == LIQUID_AUTOTEST_FAIL;
+        _q->num_tests_skip  += autotest->status == LIQUID_AUTOTEST_SKIP;
+
+        // accumulate check statistics
+        _q->num_checks_pass += autotest->num_pass;
+        _q->num_checks_fail += autotest->num_fail;
+        _q->num_checks_warn += autotest->num_warn;
+    }
+
+    // return 'ok' even if tests failed, indicating that function executed properly
+    return LIQUID_OK;
+}
+
+// print status of tests
+int liquid_registry_print_status(liquid_registry _q)
+{
+    // log results
+    liquid_log_info("=========== autotest results ===========");
+    unsigned int i;
+    for (i=0; i<_q->num_tests; i++)
+        liquid_autotest_print_status(_q->autotests[i]);
+
+    return LIQUID_OK;
+}
+
+// print summary of test run
+int liquid_registry_print_summary(liquid_registry _q)
+{
+    // get runtime since object was created (assuming minimal overhead)
+    float runtime = liquid_timer_toc(_q->timer);
+
+    //
+    int log_level = _q->num_tests_fail ? LIQUID_ERROR : LIQUID_INFO;
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"=========== autotest summary ===========");
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"tests:");
+    //liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"  run      : %u", _q->num_tests_pass + _q->num_tests_fail);
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"  pass     : %u", _q->num_tests_pass);
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"  fail     : %u", _q->num_tests_fail);
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"  skip     : %u", _q->num_tests_skip);
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"checks:");
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"  pass     : %u", _q->num_checks_pass);
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"  fail     : %u", _q->num_checks_fail);
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"overall:");
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"  warn     : %u", _q->num_checks_warn);
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"  runtime  : %.3f s", runtime);
+    liquid_log(NULL,log_level,LIQUID_FILENAME,__LINE__,"  %s", _q->num_tests_fail ? "FAIL" : "PASS");
+
+    // return non-zero value upon failure
+    return _q->num_tests_fail ? LIQUID_EINT : LIQUID_OK;
+}
+
+// export results to JSON
+int liquid_registry_json(liquid_registry _q, FILE * _fid)
+{
+    // print status
+    fprintf(_fid,"  \"pass\" : %s,\n", _q->num_tests_fail==0 ? "true" : "false");
+    fprintf(_fid,"  \"num_failed\" : %d,\n", _q->num_checks_fail);
+    fprintf(_fid,"  \"num_checks\" : %d,\n", _q->num_checks_pass + _q->num_checks_fail);
+    fprintf(_fid,"  \"num_warnings\" : %d,\n", _q->num_checks_warn);
+    fprintf(_fid,"  \"tests\" : [\n");
+    unsigned int i;
+    for (i=0; i<_q->num_tests; i++)
+    {
+        liquid_autotest test = _q->autotests[i];
+        fprintf(_fid,"    {\"id\":%4u, \"pass\":%s \"num_checks\":%4u, \"num_passed\":%4u, \"extime\":%12.4e, \"name\":\"%s\"}%s\n",
+                i,
+                test->num_fail == 0 ? "true, " : "false,",
+                test->num_pass + test->num_fail,
+                test->num_pass,
+                test->runtime,
+                test->name,
+                (i == _q->num_tests-1) ? "" : ",");
+    }
+    fprintf(_fid,"  ]\n");
+    return LIQUID_OK;
+}
+
+// contend that data in two arrays are identical
+//  _x      :   input array [size: _n x 1]
+//  _y      :   input array [size: _n x 1]
+//  _n      :   input array size
+int liquid_autotest_same_data(unsigned char * _x,
+                              unsigned char * _y,
+                              unsigned int _n)
+{
+    unsigned int i;
+    for (i=0; i<_n; i++) {
+        if (_x[i] != _y[i])
+            return 0;
+    }
+    return 1;
+}
+
+// validate spectral content
+int liquid_autotest_validate_spectrum(liquid_autotest __q__, float * _psd, unsigned int _nfft,
+        autotest_psd_s * _regions, unsigned int _num_regions, const char * _debug_filename)
+{
+    unsigned int i, j;
+    int fail[_nfft];
+    for (j=0; j<_nfft; j++)
+        fail[j] = 0;
+    for (i=0; i<_num_regions; i++) {
+        autotest_psd_s r = _regions[i];
+
+        // log result
+        char logstr[96];
+        int nc = snprintf(logstr, sizeof(logstr), " region[%2u]: f=(%6.3f,%6.3f), (", i, r.fmin, r.fmax);
+        if (r.test_lo) { nc += snprintf(logstr+nc, sizeof(logstr)-nc, "%7.2f,", r.pmin); }
+        else           { nc += snprintf(logstr+nc, sizeof(logstr)-nc, "   *   ,"); }
+        if (r.test_hi) { nc += snprintf(logstr+nc, sizeof(logstr)-nc, "%7.2f)", r.pmax); }
+        else           { nc += snprintf(logstr+nc, sizeof(logstr)-nc, "   *   )"); }
+        liquid_log_debug(logstr);
+
+        //LIQUID_REQUIRE( r.fmin >= -0.5 && r.fmax <= 0.5 && r.fmin <= r.fmax);
+        if (r.fmin < -0.5 || r.fmax > 0.5 || r.fmin > r.fmax) {
+            LIQUID_FAIL("invalid frequency range");
+            return -1;
+        }
+        for (j=0; j<_nfft; j++) {
+            // compute frequency value and check region
+            float f = (float)j / (float)_nfft - 0.5f;
+            if (f < r.fmin || f > r.fmax)
+                continue;
+
+            // test lower bound
+            if (r.test_lo && _psd[j] < r.pmin) {
+                //AUTOTEST_FAIL("region[%3u], %8.2f exceed minimum (%8.2f)", i, _psd[j], r.pmin);
+                LIQUID_FAIL("minimum value exceeded");
+                fail[j] = 1;
+            } else {
+                LIQUID_PASS();
+            }
+
+            // test upper bound
+            if (r.test_hi && _psd[j] > r.pmax) {
+                LIQUID_FAIL("maximum value exceeded");
+                fail[j] = 1;
+            } else {
+                LIQUID_PASS();
+            }
+        }
+    }
+
+    // export debug file if requested
+    if (_debug_filename != NULL) {
+        FILE * fid = fopen(_debug_filename,"w");
+        if (fid == NULL) {
+            fprintf(stderr,"could not open '%s' for writing\n", _debug_filename);
+            return -1;
+        }
+        fprintf(fid,"clear all; close all; nfft=%u; f=[0:(nfft-1)]/nfft-0.5; psd=zeros(1,nfft);\n", _nfft);
+        fprintf(fid,"idx = [");
+        for (i=0; i<_nfft; i++) { if (fail[i]) fprintf(fid,"%d,",i+1); }
+        fprintf(fid,"];\n");
+        for (i=0; i<_nfft; i++) { fprintf(fid,"psd(%6u) = %12.6f;\n", i+1, _psd[i]); }
+        fprintf(fid,"figure; xlabel('f/F_s'); ylabel('PSD [dB]'); hold on;\n");
+        // add target regions
+        for (i=0; i<_num_regions; i++) {
+            if (_regions[i].test_lo)
+                fprintf(fid,"  plot([%f,%f],[%f,%f],'Color',[0.5 0 0]);\n",_regions[i].fmin,_regions[i].fmax,_regions[i].pmin,_regions[i].pmin);
+            if (_regions[i].test_hi)
+                fprintf(fid,"  plot([%f,%f],[%f,%f],'Color',[0 0.5 0]);\n",_regions[i].fmin,_regions[i].fmax,_regions[i].pmax,_regions[i].pmax);
+        }
+        // plot spectrum
+        fprintf(fid,"  plot(f,psd,'LineWidth',2,'Color',[0 0.3 0.5]);\n");
+        fprintf(fid,"  plot(f(idx),psd(idx),'xr');\n"); // identifying errors
+        fprintf(fid,"hold off; grid on; xlim([-0.5 0.5]);\n");
+        fclose(fid);
+        liquid_log_debug("debug file written to %s", _debug_filename);
+    }
+    return 0;
+}
+
+// validate spectral content of a signal (complex)
+int liquid_autotest_validate_psd_signal(liquid_autotest __q__, float complex * _buf, unsigned int _buf_len,
+        autotest_psd_s * _regions, unsigned int num_regions, const char * debug_filename)
+{
+    // compute signal's power spectral density
+    unsigned int nfft = 4 << liquid_nextpow2(_buf_len < 64 ? 64 : _buf_len);
+    float complex * buf_time = (float complex*) malloc(nfft*sizeof(float complex));
+    float complex * buf_freq = (float complex*) malloc(nfft*sizeof(float complex));
+    float         * buf_psd  = (float *       ) malloc(nfft*sizeof(float        ));
+    if (buf_time == NULL || buf_freq == NULL || buf_psd == NULL) {
+        LIQUID_FAIL("liquid_autotest_validate_psd_signal(), could not allocate appropriate memory for validating psd");
+        return -1;
+    }
+    unsigned int i;
+    for (i=0; i<nfft; i++)
+        buf_time[i] = i < _buf_len ? _buf[i] : 0;
+    fft_run(nfft, buf_time, buf_freq, LIQUID_FFT_FORWARD, 0);
+    for (i=0; i<nfft; i++)
+        buf_psd[i] = 20*log10( cabsf( buf_freq[(i+nfft/2)%nfft] ) );
+
+    // run test
+    int rc = liquid_autotest_validate_spectrum(__q__, buf_psd, nfft,
+            _regions, num_regions, debug_filename);
+
+    // free memory and return
+    free(buf_time);
+    free(buf_freq);
+    free(buf_psd);
+    return rc;
+}
+
+// validate spectral content of a signal (real)
+int liquid_autotest_validate_psd_signalf(liquid_autotest __q__, float * _buf, unsigned int _buf_len,
+        autotest_psd_s * _regions, unsigned int num_regions, const char * debug_filename)
+{
+    // copy to temporary complex array
+    float complex * buf_cplx = (float complex*) malloc(_buf_len*sizeof(float complex));
+    if (buf_cplx == NULL) {
+        LIQUID_FAIL("liquid_autotest_validate_psd_signalf(), could not allocate appropriate memory for validating psd");
+        return -1;
+    }
+    unsigned int i;
+    for (i=0; i<_buf_len; i++)
+        buf_cplx[i] = _buf[i];
+
+    // run test
+    int rc = liquid_autotest_validate_psd_signal(__q__, buf_cplx, _buf_len,
+            _regions, num_regions, debug_filename);
+
+    // free memory and return
+    free(buf_cplx);
+    return rc;
+}
+
+// validate spectral content of a filter (real coefficients)
+int liquid_autotest_validate_psd_firfilt_crcf(liquid_autotest __q__, firfilt_crcf _q, unsigned int _nfft,
+        autotest_psd_s * _regions, unsigned int num_regions, const char * debug_filename)
+{
+    float psd[_nfft];
+    unsigned int i;
+    for (i=0; i<_nfft; i++) {
+        float f = (float)(i)/(float)(_nfft) - 0.5f;
+        float complex H;
+        firfilt_crcf_freqresponse(_q, f, &H);
+        psd[i] = 20*log10f(cabsf(H));
+    }
+    return liquid_autotest_validate_spectrum(__q__,psd,_nfft,_regions,num_regions,debug_filename);
+}
+
+// validate spectral content of a filter (complex coefficients)
+int liquid_autotest_validate_psd_firfilt_cccf(liquid_autotest __q__, firfilt_cccf _q, unsigned int _nfft,
+        autotest_psd_s * _regions, unsigned int num_regions, const char * debug_filename)
+{
+    float psd[_nfft];
+    unsigned int i;
+    for (i=0; i<_nfft; i++) {
+        float f = (float)(i)/(float)(_nfft) - 0.5f;
+        float complex H;
+        firfilt_cccf_freqresponse(_q, f, &H);
+        psd[i] = 20*log10f(cabsf(H));
+    }
+    return liquid_autotest_validate_spectrum(__q__,psd,_nfft,_regions,num_regions,debug_filename);
+}
+
+// validate spectral content of an iir filter (real coefficients, input)
+int liquid_autotest_validate_psd_iirfilt_rrrf(liquid_autotest __q__, iirfilt_rrrf _q, unsigned int _nfft,
+        autotest_psd_s * _regions, unsigned int num_regions, const char * debug_filename)
+{
+    float psd[_nfft];
+    unsigned int i;
+    for (i=0; i<_nfft; i++) {
+        float f = (float)(i)/(float)(_nfft) - 0.5f;
+        float complex H;
+        iirfilt_rrrf_freqresponse(_q, f, &H);
+        psd[i] = 20*log10f(cabsf(H));
+    }
+    return liquid_autotest_validate_spectrum(__q__,psd,_nfft,_regions,num_regions,debug_filename);
+}
+
+// validate spectral content of a spectral periodogram object
+int liquid_autotest_validate_psd_spgramcf(liquid_autotest __q__, spgramcf _q,
+        autotest_psd_s * _regions, unsigned int num_regions, const char * debug_filename)
+{
+    unsigned int nfft = spgramcf_get_nfft(_q);
+    float psd[nfft];
+    spgramcf_get_psd(_q, psd);
+    return liquid_autotest_validate_spectrum(__q__,psd,nfft,_regions,num_regions,debug_filename);
+}
+
+// callback function to simplify testing for framing objects
+int framing_autotest_callback(
+    unsigned char *  _header,
+    int              _header_valid,
+    unsigned char *  _payload,
+    unsigned int     _payload_len,
+    int              _payload_valid,
+    framesyncstats_s _stats,
+    void *           _context)
+{
+    liquid_log_info("callback invoked (%s)", _payload_valid ? "pass" : "FAIL");
+    unsigned int * secret = (unsigned int*) _context;
+    *secret = FRAMING_AUTOTEST_SECRET;
+    return 0;
+}
+
