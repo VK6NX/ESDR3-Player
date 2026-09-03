@@ -31,3 +31,5 @@ cmake --build build
 - The rest of code: GPL-3.0-or-later,
   [LICENSE](LICENSE).
 
+## Download
+[Release 1.0.0] (https://github.com/VK6NX/ESDR3-Player/releases)
