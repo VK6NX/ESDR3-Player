@@ -1,5 +1,9 @@
 # ESDR3 Player 
 
+## Project deprecated. IQ Player is now part of ESDR3 v2.x
+## Данный проект закрыт, IQ Player переехал прямо в ESDR3 v2.x
+
+<hr>
 
 Плеер IQ-записей ExpertSDR3 для Mac Silicon, Mac Intel, Win, Linux
 A light player for ExpertSDR3 IQ for Mac Silicon, Mac Intel, Win, Linux
